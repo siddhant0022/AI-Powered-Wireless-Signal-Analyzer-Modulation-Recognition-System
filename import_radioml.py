@@ -1,14 +1,4 @@
-"""
-import_radioml.py  --  OPTIONAL: convert the public RadioML 2016.10A dataset into
-the SAME format as our simulated dataset (so both can be used with load_dataset()).
 
-1. Download RADIOML 2016.10A (RML2016.10a_dict.pkl) from https://www.deepsig.ai/datasets
-2. python import_radioml.py path/to/RML2016.10a_dict.pkl
-
-Output: data/radioml_2016a.npz   (fields: X, mod, snr, split  ; 220,000 frames)
-Its 11 classes are: 8PSK, AM-DSB, AM-SSB, BPSK, CPFSK, GFSK, PAM4, QAM16, QAM64, QPSK, WBFM
-and are re-mapped to our class order (simulator.MODULATIONS).
-"""
 import os, pickle, sys
 import numpy as np
 from build_dataset import OUT_DIR, stratified_split
