@@ -1,0 +1,40 @@
+{
+  "total_frames": 51500,
+  "normal_frames": 44000,
+  "anomaly_frames": 7500,
+  "frames_per_split": {
+    "train": 36100,
+    "val": 7741,
+    "test": 7659
+  },
+  "frames_per_modulation": {
+    "BPSK": 4000,
+    "QPSK": 4000,
+    "8PSK": 4000,
+    "QAM16": 4000,
+    "QAM64": 4000,
+    "PAM4": 4000,
+    "GFSK": 4000,
+    "CPFSK": 4000,
+    "WBFM": 4000,
+    "AM-DSB": 4000,
+    "AM-SSB": 4000
+  },
+  "frames_per_anomaly_type": {
+    "none": 44000,
+    "jamming_tone": 1500,
+    "clipping": 1500,
+    "impulsive_noise": 1500,
+    "unknown_ofdm": 1500,
+    "unknown_chirp": 1500
+  },
+  "frames_per_quality": {
+    "Poor": 25661,
+    "Fair": 12853,
+    "Good": 12986
+  },
+  "frames_per_channel": {
+    "awgn": 25693,
+    "fading": 25807
+  }
+}

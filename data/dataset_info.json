@@ -1,0 +1,78 @@
+{
+  "name": "AI Wireless Signal Analyzer - simulated I/Q dataset",
+  "seed": 2026,
+  "frame_shape": [
+    2,
+    128
+  ],
+  "samples_per_symbol": 8,
+  "rrc_rolloff": 0.35,
+  "modulations": [
+    "BPSK",
+    "QPSK",
+    "8PSK",
+    "QAM16",
+    "QAM64",
+    "PAM4",
+    "GFSK",
+    "CPFSK",
+    "WBFM",
+    "AM-DSB",
+    "AM-SSB"
+  ],
+  "snr_levels_db": [
+    -20,
+    -18,
+    -16,
+    -14,
+    -12,
+    -10,
+    -8,
+    -6,
+    -4,
+    -2,
+    0,
+    2,
+    4,
+    6,
+    8,
+    10,
+    12,
+    14,
+    16,
+    18
+  ],
+  "channels": [
+    "awgn",
+    "fading"
+  ],
+  "anomaly_types": [
+    "none",
+    "jamming_tone",
+    "clipping",
+    "impulsive_noise",
+    "unknown_ofdm",
+    "unknown_chirp"
+  ],
+  "quality_rule": "Poor: SNR < 0 dB, Fair: 0-9 dB, Good: >= 10 dB",
+  "split_fractions": {
+    "train": 0.7,
+    "val": 0.15,
+    "test": 0.15
+  },
+  "n_total": 51500,
+  "n_per_split": {
+    "train": 36100,
+    "val": 7741,
+    "test": 7659
+  },
+  "n_normal": 44000,
+  "n_anomaly": 7500,
+  "cleaning_log": {
+    "frames_generated": 51500,
+    "removed_non_finite": 0,
+    "removed_zero_energy": 0,
+    "frames_kept": 51500
+  },
+  "build_seconds": 33.5
+}
