@@ -64,7 +64,7 @@ The generated dataset is already included in `data/`, so you can use it without 
 | `data/dataset_info.json`, `dataset_statistics.json` | metadata and counts |
 | `plots/` | distributions, modulation gallery, SNR effect, anomaly examples, feature sanity check |
 
-## 5. Dataset card — conventions and limitations (be upfront about these in the review)
+## 5. Dataset card — conventions and limitations 
 * **SNR definition:** signal power / noise power over the full sampled bandwidth (the RadioML convention). Signals are scaled to unit power before noise is added.
 * **Anomaly frames:** `snr` is the SNR *before* the anomaly was injected; for unknown signals it is the SNR of that signal.
 * **Simulation tool:** the signals are generated with NumPy/SciPy, replicating the GNU Radio chain, so the dataset is reproducible with no GNU Radio installation. (A GNU Radio flowgraph can be used to generate additional files in the same format.)
