@@ -188,14 +188,15 @@ def _unit_power(x):
     return x / (np.sqrt(np.mean(np.abs(x) ** 2)) + 1e-12)
 
 
-def apply_channel(x, channel, rng):
+def apply_channel(x, channel, rng, cfo_max=0.01):
     """
-    awgn   : random carrier-frequency offset + phase offset only.
+    awgn   : random carrier-frequency offset in [-cfo_max, cfo_max] + phase offset.
     fading : plus 3-tap Rayleigh multipath with exponential power-delay profile.
+    cfo_max is the maximum CFO as a fraction of the sample rate.
     Output has unit average power, so SNR is well defined afterwards.
     """
     t = np.arange(len(x))
-    cfo = rng.uniform(-0.01, 0.01)                       # +-1 % of sample-rate
+    cfo = rng.uniform(-cfo_max, cfo_max)
     x = x * np.exp(1j * (2 * np.pi * cfo * t + rng.uniform(0, 2 * np.pi)))
     if channel == "fading":
         pdp = np.exp(-np.arange(3) / 1.0)

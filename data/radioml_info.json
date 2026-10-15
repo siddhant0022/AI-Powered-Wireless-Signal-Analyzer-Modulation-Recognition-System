@@ -1,0 +1,54 @@
+{
+  "input_file": "RML2016.10a_dict.pkl",
+  "keys": 220,
+  "modulations": [
+    "8PSK",
+    "AM-DSB",
+    "AM-SSB",
+    "BPSK",
+    "CPFSK",
+    "GFSK",
+    "PAM4",
+    "QAM16",
+    "QAM64",
+    "QPSK",
+    "WBFM"
+  ],
+  "snr_levels_db": [
+    -20,
+    -18,
+    -16,
+    -14,
+    -12,
+    -10,
+    -8,
+    -6,
+    -4,
+    -2,
+    0,
+    2,
+    4,
+    6,
+    8,
+    10,
+    12,
+    14,
+    16,
+    18
+  ],
+  "frames_before_cleaning": 220000,
+  "frames_used_for_raw_power_stats": 220000,
+  "raw_average_power_per_frame": {
+    "mean": 7.31716547808503e-05,
+    "min": 6.10364459812336e-05,
+    "max": 0.0006465911672411802
+  },
+  "dropped_non_finite": 0,
+  "dropped_zero_power": 0,
+  "frames_kept": 220000,
+  "frames_per_split": {
+    "train": 154000,
+    "val": 33000,
+    "test": 33000
+  }
+}

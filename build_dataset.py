@@ -4,6 +4,7 @@ build_dataset.py  --  Generate, clean, label and split the dataset.
     python build_dataset.py                       # default: ~49k frames, ~50 MB
     python build_dataset.py --per-cell 100        # smaller / faster
     python build_dataset.py --per-cell 500 --seed 7
+    python build_dataset.py --cfo-max 0.001       # narrower carrier-frequency offset
 
 Pipeline (matches the October plan: collect/simulate -> clean -> label):
     1. SIMULATE : 11 modulations x 20 SNR levels x 2 channels (+ 5 anomaly types)
@@ -19,22 +20,24 @@ import simulator as sim
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 
-def make_normal_frame(mod, snr, channel, rng):
+def make_normal_frame(mod, snr, channel, rng, cfo_max=0.01):
     x = sim.GENERATORS[mod](rng)
-    x = sim.apply_channel(x, channel, rng)
+    x = sim.apply_channel(x, channel, rng, cfo_max=cfo_max)
     return sim.add_awgn(x, snr, rng)
 
 
-def make_anomaly_frame(atype, rng):
+def make_anomaly_frame(atype, rng, cfo_max=0.01):
     """Return (complex frame, base_modulation or 'UNKNOWN', snr_db, channel)."""
     snr = int(rng.choice(sim.SNR_LIST))
     channel = str(rng.choice(sim.CHANNELS))
     if atype in ("unknown_ofdm", "unknown_chirp"):
         x = sim.gen_ofdm(rng) if atype == "unknown_ofdm" else sim.gen_chirp(rng)
-        x = sim.apply_channel(x, channel, rng)
+        x = sim.apply_channel(x, channel, rng, cfo_max=cfo_max)
         return sim.add_awgn(x, snr, rng), "UNKNOWN", snr, channel
     mod = str(rng.choice(sim.MODULATIONS))
-    x = sim.apply_channel(sim.GENERATORS[mod](rng), channel, rng)
+    x = sim.apply_channel(
+        sim.GENERATORS[mod](rng), channel, rng, cfo_max=cfo_max
+    )
     x = sim.add_awgn(x, snr, rng)
     inject = {"jamming_tone": sim.inject_jamming_tone,
               "clipping": sim.inject_clipping,
@@ -77,7 +80,12 @@ def main():
                     help="frames per (modulation, SNR, channel) cell  [default 100]")
     ap.add_argument("--anomalies-per-type", type=int, default=1500)
     ap.add_argument("--seed", type=int, default=2026)
+    ap.add_argument("--cfo-max", type=float, default=0.01,
+                    help="maximum absolute carrier-frequency offset as a fraction "
+                         "of the sample rate [default 0.01]")
     args = ap.parse_args()
+    if not np.isfinite(args.cfo_max) or not 0 <= args.cfo_max <= 0.5:
+        ap.error("--cfo-max must be between 0 and 0.5")
 
     rng = np.random.default_rng(args.seed)
     t0 = time.time()
@@ -88,7 +96,9 @@ def main():
         for ch in sim.CHANNELS:
             for s in sim.SNR_LIST:
                 for _ in range(args.per_cell):
-                    X.append(to_iq(make_normal_frame(mod, s, ch, rng)))
+                    X.append(to_iq(make_normal_frame(
+                        mod, s, ch, rng, cfo_max=args.cfo_max
+                    )))
                     mod_id.append(sim.MOD_ID[mod]); snr.append(s)
                     chan.append(sim.CHAN_ID[ch]); anom.append(0)
         print(f"  simulated {mod:7s}  ({len(X):6d} frames so far)")
@@ -96,7 +106,9 @@ def main():
     # ... and anomalies ---------------------------------------------------------
     for atype in sim.ANOMALY_TYPES[1:]:
         for _ in range(args.anomalies_per_type):
-            x, base, s, ch = make_anomaly_frame(atype, rng)
+            x, base, s, ch = make_anomaly_frame(
+                atype, rng, cfo_max=args.cfo_max
+            )
             X.append(to_iq(x))
             mod_id.append(-1 if base == "UNKNOWN" else sim.MOD_ID[base])
             snr.append(s); chan.append(sim.CHAN_ID[ch]); anom.append(sim.ANOM_ID[atype])
@@ -129,11 +141,20 @@ def main():
 
     # 5. SAVE ---------------------------------------------------------------------
     os.makedirs(OUT_DIR, exist_ok=True)
-    np.savez_compressed(os.path.join(OUT_DIR, "signal_dataset.npz"),
+    if args.cfo_max == 0.01:
+        output_stem = "signal_dataset"
+        labels_name = "labels.csv"
+        info_name = "dataset_info.json"
+    else:
+        cfo_tag = format(args.cfo_max, ".12g").replace(".", "").replace("-", "m")
+        output_stem = f"signal_dataset_cfo{cfo_tag}"
+        labels_name = f"{output_stem}_labels.csv"
+        info_name = f"{output_stem}_info.json"
+    np.savez_compressed(os.path.join(OUT_DIR, f"{output_stem}.npz"),
                         X=X, mod=mod_id, snr=snr, channel=chan, anomaly=is_anom,
                         anomaly_type=anom, quality=quality, split=split)
 
-    with open(os.path.join(OUT_DIR, "labels.csv"), "w", newline="") as f:
+    with open(os.path.join(OUT_DIR, labels_name), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["index", "split", "modulation", "snr_db", "channel", "quality",
                     "is_anomaly", "anomaly_type"])
@@ -148,6 +169,7 @@ def main():
     info = {
         "name": "AI Wireless Signal Analyzer - simulated I/Q dataset",
         "seed": args.seed, "frame_shape": [2, sim.FRAME_LEN],
+        "cfo_max_fraction_of_sample_rate": args.cfo_max,
         "samples_per_symbol": sim.SPS, "rrc_rolloff": sim.ROLLOFF,
         "modulations": sim.MODULATIONS, "snr_levels_db": sim.SNR_LIST,
         "channels": sim.CHANNELS, "anomaly_types": sim.ANOMALY_TYPES,
@@ -158,9 +180,12 @@ def main():
         "n_normal": int((is_anom == 0).sum()), "n_anomaly": int(is_anom.sum()),
         "cleaning_log": log, "build_seconds": round(time.time() - t0, 1),
     }
-    with open(os.path.join(OUT_DIR, "dataset_info.json"), "w") as f:
+    with open(os.path.join(OUT_DIR, info_name), "w") as f:
         json.dump(info, f, indent=2)
-    print(f"\nDONE  {len(X)} frames in {info['build_seconds']} s  ->  {OUT_DIR}")
+    print(
+        f"\nDONE  {len(X)} frames in {info['build_seconds']} s  ->  "
+        f"{os.path.join(OUT_DIR, output_stem + '.npz')}"
+    )
 
 
 if __name__ == "__main__":
