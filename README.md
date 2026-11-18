@@ -250,7 +250,7 @@ If PowerShell does not allow environment activation, use the environment's inter
 .\.venv\Scripts\python.exe validate_and_plot.py
 ```
 
-The repository already includes the datasets and most generated results, so rebuilding or retraining is not required to read the reports.
+The large RadioML source pickle and converted RadioML dataset are kept out of GitHub because each exceeds GitHub's regular-file size limit. They remain on the current machine. To create the simulated dataset, run `python build_dataset.py`. To use RadioML, place `RML2016.10a_dict.pkl` in `data/` and run the importer described below. Generated reports and results remain available in the repository.
 
 ## Quick start
 
