@@ -40,11 +40,12 @@ One of these 11 modulations:
 
 **What is not implemented yet?**
 
-Anomaly detection and SNR estimation are prepared for future work. In the current Stage A pipeline:
+Anomaly detection is prepared for future work. The default Stage A pipeline:
 
 - anomaly frames are excluded from modulation training;
-- the optional SNR prediction head is not trained;
 - only the 11-class modulation head is used.
+
+An optional joint modulation-and-SNR training mode is available with `--use-snr`.
 
 ## End-to-end workflow
 
@@ -78,8 +79,8 @@ Training
   - Load known, normal modulation frames
   - Apply random phase rotation
   - Train the CNN
-  - Select the checkpoint with the lowest validation loss
-  - Evaluate the test set once
+  - Default Stage A: select by validation cross-entropy, then evaluate the test set
+  - Joint SNR mode: select by combined validation modulation accuracy and SNR error
 
           |
           v
@@ -360,6 +361,20 @@ Full RadioML run:
 python train.py --data data\radioml_2016a.npz --epochs 20 --seed 2026 --tag radioml_stageA
 ```
 
+Joint modulation and SNR training:
+
+```powershell
+python train.py --dataset simulated --use-snr --epochs 60 --run-name simulated_snr
+python train.py --dataset radioml --use-snr --epochs 60 --run-name radioml_snr
+```
+
+The joint model selects checkpoints using
+`val_mod_acc - 0.5 * val_snr_mae_db / 20`. Use `--resume` with the same run name
+to continue from its `last.pt`; the requested `--epochs` is the final epoch number.
+Runs save `best.pt`, `last.pt`, `history.csv`, and `config.json` under
+`results/<run-name>/`. The default modulation-only path retains validation
+cross-entropy checkpoint selection and its Stage A test evaluation.
+
 View all trainer options:
 
 ```powershell
@@ -451,7 +466,9 @@ Not yet. Anomaly frames and labels are generated, but Stage A only trains the 11
 
 ### Can the project estimate SNR?
 
-Not yet. The model class has an optional SNR head, but Stage A training currently uses only modulation classification.
+Yes. Use `train.py --dataset simulated --use-snr` or
+`train.py --dataset radioml --use-snr` to train the optional SNR head jointly
+with modulation classification. The default Stage A run remains modulation-only.
 
 ### Can I change the number of training epochs?
 
@@ -466,7 +483,7 @@ Yes. CPU is supported and is used automatically if CUDA is unavailable.
 - simulated analog messages are generated approximations, not real speech or music;
 - the synthetic channel model is simplified;
 - Stage A does not yet detect anomalies;
-- Stage A does not yet estimate SNR;
+- the optional SNR mode does not yet produce a dedicated test-set SNR report;
 - the CNN is evaluated on fixed datasets and saved seeds;
 - lower-CFO results show one controlled experiment, not a guarantee for real radio hardware;
 - RadioML and simulated data are different sources and should not be treated as identical test conditions.
@@ -474,7 +491,7 @@ Yes. CPU is supported and is used automatically if CUDA is unavailable.
 ## Possible next stages
 
 - train and evaluate an anomaly classifier;
-- enable and train the SNR regression head;
+- add dedicated test-set SNR metrics;
 - test more seeds and dataset sizes;
 - add stronger channel and hardware impairments;
 - evaluate on additional real-world datasets;

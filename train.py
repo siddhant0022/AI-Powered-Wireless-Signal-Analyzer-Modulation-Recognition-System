@@ -15,7 +15,12 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from dataset_loader import MODULATIONS
-from model import MultiTaskCNN
+from model import (
+    MultiTaskCNN,
+    checkpoint_payload,
+    load_model_checkpoint,
+    scale_snr_target,
+)
 
 
 def set_seed(seed):
@@ -79,31 +84,53 @@ def rotate_phase(batch, angles):
     )
 
 
-def _make_loader(data, batch_size, shuffle):
-    X, mod, _ = data
+def _make_loader(data, batch_size, shuffle, device="cpu", use_snr=False):
+    X, mod, snr = data
+    tensors = [
+        torch.as_tensor(X, dtype=torch.float32, device=device),
+        torch.as_tensor(mod, dtype=torch.long, device=device),
+    ]
+    if use_snr:
+        snr_db = torch.as_tensor(snr, dtype=torch.float32, device=device)
+        tensors.append(scale_snr_target(snr_db))
     return DataLoader(
-        TensorDataset(torch.from_numpy(X), torch.from_numpy(mod)),
+        TensorDataset(*tensors),
         batch_size=batch_size,
         shuffle=shuffle,
-        pin_memory=torch.cuda.is_available(),
+        num_workers=0,
     )
 
 
-def _run_epoch(model, loader, criterion, device, optimizer=None):
+def _run_epoch(model, loader, criterion, device, optimizer=None, use_snr=False,
+               lambda_snr=1.0):
     training = optimizer is not None
     model.train(training)
-    total_loss, total_correct, total_count = 0.0, 0, 0
-    for X, labels in loader:
+    total_loss, total_correct, total_snr_error, total_count = 0.0, 0, 0.0, 0
+    for batch in loader:
+        X, labels = batch[:2]
         X = X.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
+        if use_snr:
+            snr_target = batch[2].to(device, non_blocking=True)
         if training:
             angles = torch.rand(len(X), device=device) * (2 * torch.pi)
             X = rotate_phase(X, angles)
             optimizer.zero_grad(set_to_none=True)
 
         with torch.set_grad_enabled(training):
-            logits = model(X)
-            loss = criterion(logits, labels)
+            output = model(X)
+            if use_snr:
+                logits, snr_pred = output
+                snr_pred = snr_pred.squeeze(1)
+                loss = criterion(logits, labels) + lambda_snr * nn.functional.smooth_l1_loss(
+                    snr_pred, snr_target
+                )
+                total_snr_error += (
+                    (snr_pred.detach() - snr_target).abs().sum().item() * 20
+                )
+            else:
+                logits = output
+                loss = criterion(logits, labels)
             if training:
                 loss.backward()
                 optimizer.step()
@@ -112,7 +139,10 @@ def _run_epoch(model, loader, criterion, device, optimizer=None):
         total_loss += loss.item() * count
         total_correct += (logits.argmax(dim=1) == labels).sum().item()
         total_count += count
-    return total_loss / total_count, total_correct / total_count
+    metrics = (total_loss / total_count, total_correct / total_count)
+    if use_snr:
+        return (*metrics, total_snr_error / total_count)
+    return metrics
 
 
 def _predict(model, X, batch_size, device):
@@ -199,87 +229,285 @@ def _save_test_outputs(model, path, batch_size, device, output_dir):
     return summary
 
 
+def _capture_rng_states():
+    numpy_state = np.random.get_state()
+    return {
+        "python": random.getstate(),
+        "numpy": [
+            numpy_state[0], numpy_state[1].tolist(), numpy_state[2],
+            numpy_state[3], numpy_state[4],
+        ],
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+    }
+
+
+def _restore_rng_states(states):
+    random.setstate(states["python"])
+    numpy_state = states["numpy"]
+    np.random.set_state((
+        numpy_state[0], np.asarray(numpy_state[1], dtype=np.uint32),
+        int(numpy_state[2]), int(numpy_state[3]), float(numpy_state[4]),
+    ))
+    torch.set_rng_state(states["torch_cpu"].cpu())
+    if torch.cuda.is_available() and states["torch_cuda"]:
+        torch.cuda.set_rng_state_all([state.cpu() for state in states["torch_cuda"]])
+
+
+def _write_history_csv(path, rows):
+    fields = (
+        "epoch", "train_loss", "val_loss", "val_mod_acc",
+        "val_snr_mae_db", "epoch_seconds",
+    )
+    with open(path, "w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _read_history_csv(path):
+    if not os.path.isfile(path):
+        return []
+    with open(path, newline="", encoding="utf-8") as stream:
+        return [
+            {
+                **row,
+                "epoch": int(row["epoch"]),
+                "train_loss": float(row["train_loss"]),
+                "val_loss": float(row["val_loss"]),
+                "val_mod_acc": float(row["val_mod_acc"]),
+                "val_snr_mae_db": (
+                    float(row["val_snr_mae_db"]) if row["val_snr_mae_db"] else ""
+                ),
+                "epoch_seconds": float(row["epoch_seconds"]),
+            }
+            for row in csv.DictReader(stream)
+        ]
+
+
+def _save_checkpoint(path, payload):
+    temporary_path = f"{path}.tmp"
+    torch.save(payload, temporary_path)
+    os.replace(temporary_path, path)
+
+
 def train(args):
     set_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    output_dir = os.path.join("results", args.tag)
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    dataset_paths = {
+        "simulated": os.path.join("data", "signal_dataset.npz"),
+        "radioml": os.path.join("data", "radioml_2016a.npz"),
+    }
+    data_path = args.data or dataset_paths[args.dataset]
+    output_dir = os.path.join(args.out_dir, args.run_name)
     os.makedirs(output_dir, exist_ok=True)
-    splits = load_training_splits(args.data)
-    train_loader = _make_loader(splits["train"], args.batch, shuffle=True)
-    val_loader = _make_loader(splits["val"], args.batch, shuffle=False)
+    last_path = os.path.join(output_dir, "last.pt")
+    best_path = os.path.join(output_dir, "best.pt")
+    best_model_path = os.path.join(output_dir, "best_model.pt")
+    history_path = os.path.join(output_dir, "history.csv")
+    config_path = os.path.join(output_dir, "config.json")
 
-    model = MultiTaskCNN().to(device)
+    patience = args.patience
+    if patience is None and not args.use_snr:
+        patience = 8
+    training_config = {
+        "dataset": args.dataset,
+        "data_path": os.path.abspath(data_path),
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+        "weight_decay": args.wd,
+        "lambda_snr": args.lambda_snr,
+        "use_snr": args.use_snr,
+        "seed": args.seed,
+        "device": str(device),
+    }
+
+    splits = load_training_splits(data_path)
+    train_loader = _make_loader(
+        splits["train"], args.batch_size, shuffle=True, device=device,
+        use_snr=args.use_snr,
+    )
+    val_loader = _make_loader(
+        splits["val"], args.batch_size, shuffle=False, device=device,
+        use_snr=args.use_snr,
+    )
+
+    model = MultiTaskCNN(use_snr=args.use_snr).to(device)
+    model_config = model.get_config()
+    run_config = {
+        **vars(args),
+        "data_path": os.path.abspath(data_path),
+        "device": str(device),
+        "effective_patience": patience,
+        "model": model_config,
+        "checkpoint_selection": (
+            "val_mod_acc - 0.5 * val_snr_mae_db / 20"
+            if args.use_snr else "lowest validation modulation cross-entropy"
+        ),
+    }
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, factor=0.5, patience=3
     )
-    history = {"epoch": [], "train_loss": [], "val_loss": [], "val_accuracy": [],
-               "seconds_per_epoch": []}
-    best_loss, best_epoch, epochs_without_improvement = float("inf"), 0, 0
-    checkpoint_path = os.path.join(output_dir, "best_model.pt")
+    history_rows = []
+    start_epoch = 1
+    best_score, best_epoch, epochs_without_improvement = float("-inf"), 0, 0
 
-    print(f"Device: {device}; train={len(splits['train'][0])}; val={len(splits['val'][0])}")
-    for epoch in range(1, args.epochs + 1):
+    if args.resume and os.path.isfile(last_path):
+        loaded_model, checkpoint = load_model_checkpoint(last_path, map_location="cpu")
+        if checkpoint.get("training_config") != training_config:
+            raise ValueError("Resume configuration does not match the saved run")
+        if not all(key in checkpoint for key in (
+            "optimizer_state_dict", "scheduler_state_dict", "rng_states", "epoch",
+        )):
+            raise ValueError(f"{last_path} is missing resumable training state")
+        model.load_state_dict(loaded_model.state_dict())
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        best_score = float(checkpoint["best_score"])
+        best_epoch = int(checkpoint["best_epoch"])
+        epochs_without_improvement = int(checkpoint["epochs_without_improvement"])
+        history_rows = checkpoint.get("history_rows", _read_history_csv(history_path))
+        _restore_rng_states(checkpoint["rng_states"])
+
+    with open(config_path, "w", encoding="utf-8") as stream:
+        json.dump(run_config, stream, indent=2)
+    _write_history_csv(history_path, history_rows)
+
+    print(
+        f"Device: {device}; train={len(splits['train'][0])}; "
+        f"val={len(splits['val'][0])}; use_snr={args.use_snr}"
+    )
+    for epoch in range(start_epoch, args.epochs + 1):
         started = time.perf_counter()
-        train_loss, _ = _run_epoch(
-            model, train_loader, criterion, device, optimizer=optimizer
+        train_metrics = _run_epoch(
+            model, train_loader, criterion, device, optimizer=optimizer,
+            use_snr=args.use_snr, lambda_snr=args.lambda_snr,
         )
-        val_loss, val_accuracy = _run_epoch(model, val_loader, criterion, device)
+        val_metrics = _run_epoch(
+            model, val_loader, criterion, device, use_snr=args.use_snr,
+            lambda_snr=args.lambda_snr,
+        )
+        train_loss = train_metrics[0]
+        val_loss, val_mod_acc = val_metrics[:2]
+        val_snr_mae_db = val_metrics[2] if args.use_snr else ""
         scheduler.step(val_loss)
         elapsed = time.perf_counter() - started
 
-        history["epoch"].append(epoch)
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-        history["val_accuracy"].append(val_accuracy)
-        history["seconds_per_epoch"].append(elapsed)
+        score = (
+            val_mod_acc - 0.5 * val_snr_mae_db / 20
+            if args.use_snr else -val_loss
+        )
+        improved = score > best_score
+        if improved:
+            best_score, best_epoch, epochs_without_improvement = score, epoch, 0
+        else:
+            epochs_without_improvement += 1
+
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_mod_acc": val_mod_acc,
+            "val_snr_mae_db": val_snr_mae_db,
+            "epoch_seconds": elapsed,
+        }
+        history_rows.append(row)
+        _write_history_csv(history_path, history_rows)
         print(
             f"Epoch {epoch:03d}/{args.epochs} "
             f"train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
-            f"val_accuracy={val_accuracy:.4f} seconds={elapsed:.1f}"
+            f"val_mod_acc={val_mod_acc:.4f} "
+            f"val_snr_mae_db={val_snr_mae_db if args.use_snr else 'n/a'} "
+            f"seconds={elapsed:.1f}"
         )
 
-        if val_loss < best_loss:
-            best_loss, best_epoch, epochs_without_improvement = val_loss, epoch, 0
-            torch.save(
-                {"model_state_dict": model.state_dict(), "epoch": epoch,
-                 "val_loss": val_loss},
-                checkpoint_path,
-            )
-        else:
-            epochs_without_improvement += 1
-        if epochs_without_improvement >= args.patience:
+        payload = checkpoint_payload(
+            model,
+            optimizer_state_dict=optimizer.state_dict(),
+            scheduler_state_dict=scheduler.state_dict(),
+            epoch=epoch,
+            best_score=best_score,
+            best_epoch=best_epoch,
+            epochs_without_improvement=epochs_without_improvement,
+            rng_states=_capture_rng_states(),
+            training_config=training_config,
+            history_rows=history_rows,
+            val_loss=val_loss,
+            val_mod_acc=val_mod_acc,
+            val_snr_mae_db=val_snr_mae_db,
+        )
+        if improved:
+            _save_checkpoint(best_path, payload)
+            if not args.use_snr:
+                _save_checkpoint(best_model_path, payload)
+        _save_checkpoint(last_path, payload)
+
+        if patience is not None and epochs_without_improvement >= patience:
             print(f"Early stopping after epoch {epoch}; best epoch was {best_epoch}.")
             break
 
-    with open(os.path.join(output_dir, "history.json"), "w", encoding="utf-8") as f:
-        json.dump({**history, "best_epoch": best_epoch, "best_val_loss": best_loss}, f, indent=2)
+    history = {
+        "epoch": [row["epoch"] for row in history_rows],
+        "train_loss": [row["train_loss"] for row in history_rows],
+        "val_loss": [row["val_loss"] for row in history_rows],
+        "val_accuracy": [row["val_mod_acc"] for row in history_rows],
+        "seconds_per_epoch": [row["epoch_seconds"] for row in history_rows],
+    }
+    if args.use_snr:
+        history["val_snr_mae_db"] = [row["val_snr_mae_db"] for row in history_rows]
+    history_summary = {
+        **history,
+        "best_epoch": best_epoch,
+        "best_score": best_score,
+    }
+    if not args.use_snr:
+        history_summary["best_val_loss"] = -best_score
+    with open(os.path.join(output_dir, "history.json"), "w", encoding="utf-8") as stream:
+        json.dump(history_summary, stream, indent=2)
     _plot_history(history, output_dir)
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    summary = _save_test_outputs(model, args.data, args.batch, device, output_dir)
-    print(
-        f"Test accuracy={summary['test_accuracy']:.4f}; "
-        f"SNR >= 10 dB={summary['test_accuracy_snr_ge_10_db']:.4f}; "
-        f"SNR < 0 dB={summary['test_accuracy_snr_lt_0_db']:.4f}"
-    )
+
+    if not args.use_snr:
+        model, _ = load_model_checkpoint(best_model_path, map_location=device)
+        summary = _save_test_outputs(
+            model, data_path, args.batch_size, device, output_dir
+        )
+        print(
+            f"Test accuracy={summary['test_accuracy']:.4f}; "
+            f"SNR >= 10 dB={summary['test_accuracy_snr_ge_10_db']:.4f}; "
+            f"SNR < 0 dB={summary['test_accuracy_snr_lt_0_db']:.4f}"
+        )
+    return output_dir
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", default=os.path.join("data", "radioml_2016a.npz"))
+    parser.add_argument("--dataset", choices=("simulated", "radioml"), default="radioml")
+    parser.add_argument("--data", help="optional explicit dataset NPZ path")
+    parser.add_argument("--use-snr", action="store_true")
+    parser.add_argument("--lambda-snr", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=60)
-    parser.add_argument("--batch", type=int, default=256)
+    parser.add_argument("--batch-size", "--batch", dest="batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--wd", type=float, default=1e-4)
-    parser.add_argument("--patience", type=int, default=8)
+    parser.add_argument("--device")
+    parser.add_argument("--run-name", "--tag", dest="run_name", default="stageA")
+    parser.add_argument("--out-dir", default="results")
+    parser.add_argument("--patience", type=int, default=None)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--tag", default="stageA")
-    args = parser.parse_args()
-    if args.epochs < 1 or args.batch < 1 or args.patience < 1:
-        parser.error("--epochs, --batch, and --patience must be positive")
-    train(args)
+    args = parser.parse_args(argv)
+    if args.epochs < 1 or args.batch_size < 1:
+        parser.error("--epochs and --batch-size must be positive")
+    if args.patience is not None and args.patience < 1:
+        parser.error("--patience must be positive when provided")
+    if args.lr <= 0 or args.wd < 0 or not np.isfinite(args.lambda_snr) or args.lambda_snr < 0:
+        parser.error("--lr must be positive; --wd and --lambda-snr must be non-negative")
+    return train(args)
 
 
 if __name__ == "__main__":

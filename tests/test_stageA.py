@@ -1,3 +1,5 @@
+import csv
+
 import numpy as np
 import torch
 
@@ -9,7 +11,40 @@ from model import (
     quality_from_snr,
     scale_snr_target,
 )
-from train import rotate_phase
+from train import _make_loader, load_training_splits, main, rotate_phase
+
+
+def _write_small_training_dataset(path, frame_count=240):
+    rng = np.random.default_rng(2026)
+    X = rng.standard_normal((frame_count, 2, 128), dtype=np.float32)
+    mod = (np.arange(frame_count) % 11).astype(np.int16)
+    snr = np.resize(np.array([-20, -10, 0, 10, 18], dtype=np.int16), frame_count)
+    train_end = int(frame_count * 0.70)
+    val_end = int(frame_count * 0.85)
+    split = np.concatenate((
+        np.zeros(train_end, dtype=np.int8),
+        np.ones(val_end - train_end, dtype=np.int8),
+        np.full(frame_count - val_end, 2, dtype=np.int8),
+    ))
+    np.savez_compressed(
+        path, X=X, mod=mod, snr=snr, split=split,
+        anomaly=np.zeros(frame_count, dtype=np.int8),
+    )
+    return path
+
+
+def _small_run_args(dataset_path, out_dir, run_name, epochs, *extra):
+    return [
+        "--dataset", "simulated",
+        "--data", str(dataset_path),
+        "--out-dir", str(out_dir),
+        "--run-name", run_name,
+        "--epochs", str(epochs),
+        "--batch-size", "64",
+        "--device", "cpu",
+        "--seed", "2026",
+        *extra,
+    ]
 
 
 def test_modulation_output_shape():
@@ -71,6 +106,76 @@ def test_quality_from_snr_thresholds():
     snr_db = np.array([-2, 0, 8, 9, 10, 18])
 
     assert quality_from_snr(snr_db).tolist() == [0, 1, 1, 1, 2, 2]
+
+
+def test_snr_training_smoke_writes_checkpoints_and_finite_losses(tmp_path):
+    dataset_path = _write_small_training_dataset(tmp_path / "small.npz")
+    train_data = load_training_splits(dataset_path)["train"]
+    batch = next(iter(_make_loader(
+        train_data, 32, shuffle=False, device="cpu", use_snr=True
+    )))
+    assert batch[2].dtype == torch.float32
+    assert batch[2].shape == (32,)
+
+    output_dir = main(_small_run_args(
+        dataset_path, tmp_path, "snr-smoke", 1, "--use-snr"
+    ))
+    assert (tmp_path / "snr-smoke" / "best.pt").is_file()
+    assert (tmp_path / "snr-smoke" / "last.pt").is_file()
+    with open(tmp_path / "snr-smoke" / "history.csv", newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1
+    assert all(np.isfinite(float(rows[0][key])) for key in (
+        "train_loss", "val_loss", "val_mod_acc", "val_snr_mae_db",
+    ))
+    checkpoint = torch.load(
+        tmp_path / "snr-smoke" / "last.pt", map_location="cpu", weights_only=True
+    )
+    assert checkpoint["epoch"] == 1
+    assert checkpoint["config"]["use_snr"] is True
+    assert {
+        "optimizer_state_dict", "scheduler_state_dict", "rng_states", "best_score",
+    }.issubset(checkpoint)
+    assert (tmp_path / "snr-smoke" / "config.json").is_file()
+    assert output_dir == str(tmp_path / "snr-smoke")
+
+
+def test_resume_continues_epoch_and_history(tmp_path):
+    dataset_path = _write_small_training_dataset(tmp_path / "small.npz")
+    main(_small_run_args(
+        dataset_path, tmp_path, "resume-smoke", 2, "--use-snr"
+    ))
+    checkpoint_path = tmp_path / "resume-smoke" / "last.pt"
+    before_resume = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=True
+    )["model_state_dict"]["modulation_head.weight"].clone()
+    main(_small_run_args(
+        dataset_path, tmp_path, "resume-smoke", 3, "--use-snr", "--resume"
+    ))
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    with open(tmp_path / "resume-smoke" / "history.csv", newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert checkpoint["epoch"] == 3
+    assert [int(row["epoch"]) for row in rows] == [1, 2, 3]
+    assert not torch.equal(
+        before_resume, checkpoint["model_state_dict"]["modulation_head.weight"]
+    )
+
+
+def test_default_training_saves_modulation_only_checkpoint(tmp_path):
+    dataset_path = _write_small_training_dataset(tmp_path / "small.npz")
+    main(_small_run_args(dataset_path, tmp_path, "modulation-only", 1))
+
+    checkpoint = torch.load(
+        tmp_path / "modulation-only" / "best.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    model, _ = load_model_checkpoint(tmp_path / "modulation-only" / "best.pt")
+    assert checkpoint["config"]["use_snr"] is False
+    assert model(torch.zeros(4, 2, 128)).shape == (4, 11)
+    assert (tmp_path / "modulation-only" / "best_model.pt").is_file()
 
 
 def test_phase_rotation_preserves_unit_power():
