@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from dataset_loader import CHANNEL_NAMES, MODULATIONS, QUALITY_NAMES, load_dataset
-from model import load_model_checkpoint, quality_from_snr
+from model import load_model_checkpoint, quality_from_snr, unpack_model_output
 from snr_metrics import (
     modulation_accuracy_by_snr_range,
     per_snr_regression_metrics,
@@ -54,8 +54,19 @@ def _compute_metrics(mod_true, mod_pred, snr_true, snr_pred, modulation_names):
             "count": int(mask.sum()),
         }
 
-    true_quality = np.asarray(quality_from_snr(snr_true), dtype=np.int64)
-    estimated_quality = np.asarray(quality_from_snr(snr_pred), dtype=np.int64)
+    if snr_pred is None:
+        snr_estimation = None
+        quality_metrics = None
+    else:
+        true_quality = np.asarray(quality_from_snr(snr_true), dtype=np.int64)
+        estimated_quality = np.asarray(quality_from_snr(snr_pred), dtype=np.int64)
+        snr_estimation = {
+            "overall": regression_metrics(snr_true, snr_pred),
+            "per_true_snr": per_snr_regression_metrics(
+                snr_true, snr_true, snr_pred, levels=SNR_LEVELS
+            ),
+        }
+        quality_metrics = quality_confusion_metrics(true_quality, estimated_quality)
     return {
         "test_frames": int(len(mod_true)),
         "modulation": {
@@ -64,13 +75,8 @@ def _compute_metrics(mod_true, mod_pred, snr_true, snr_pred, modulation_names):
             "accuracy_by_snr": per_snr_accuracy,
             "per_modulation": per_modulation,
         },
-        "snr_estimation": {
-            "overall": regression_metrics(snr_true, snr_pred),
-            "per_true_snr": per_snr_regression_metrics(
-                snr_true, snr_true, snr_pred, levels=SNR_LEVELS
-            ),
-        },
-        "quality": quality_confusion_metrics(true_quality, estimated_quality),
+        "snr_estimation": snr_estimation,
+        "quality": quality_metrics,
     }
 
 
@@ -144,16 +150,21 @@ def load_stage_a_baseline(dataset):
     return _baseline_from_markdown(markdown_path, dataset)
 
 
-def _evaluate_checkpoint(run_name, dataset, device, checkpoint_name):
+def _resolve_checkpoint_path(run_name, checkpoint_name):
+    if os.path.isabs(checkpoint_name):
+        return checkpoint_name
     run_dir = os.path.join(ROOT, "results", run_name)
-    checkpoint_path = (
-        checkpoint_name
-        if os.path.isabs(checkpoint_name)
-        else os.path.join(run_dir, checkpoint_name)
-    )
+    checkpoint_path = os.path.join(run_dir, checkpoint_name)
+    if not os.path.isfile(checkpoint_path) and checkpoint_name == "best.pt":
+        legacy_path = os.path.join(run_dir, "best_model.pt")
+        if os.path.isfile(legacy_path):
+            return legacy_path
+    return checkpoint_path
+
+
+def _evaluate_checkpoint(run_name, dataset, device, checkpoint_name):
+    checkpoint_path = _resolve_checkpoint_path(run_name, checkpoint_name)
     model, checkpoint = load_model_checkpoint(checkpoint_path, map_location="cpu")
-    if not model.use_snr:
-        raise ValueError(f"{checkpoint_path} has no SNR head; use a --use-snr checkpoint")
     model = model.to(device).eval()
 
     data = load_dataset("test", normal_only=True, dataset=dataset)
@@ -165,15 +176,22 @@ def _evaluate_checkpoint(run_name, dataset, device, checkpoint_name):
     if not len(mod_true):
         raise ValueError("The test split contains no normal frames with known modulation")
 
-    mod_predictions, snr_predictions = [], []
+    mod_predictions = []
+    snr_predictions = [] if model.use_snr else None
     with torch.inference_mode():
         for start in range(0, len(X), 512):
             batch = X[start:start + 512]
-            mod_logits, _ = model(batch)
+            mod_logits, _, _, _ = unpack_model_output(model(batch))
             mod_predictions.append(mod_logits.argmax(dim=1).cpu().numpy())
-            snr_predictions.append(model.predict_snr_db(batch).squeeze(1).cpu().numpy())
+            if model.use_snr:
+                snr_predictions.append(
+                    model.predict_snr_db(batch).squeeze(1).cpu().numpy()
+                )
     mod_pred = np.concatenate(mod_predictions)
-    snr_pred = np.concatenate(snr_predictions).astype(np.float64, copy=False)
+    snr_pred = (
+        np.concatenate(snr_predictions).astype(np.float64, copy=False)
+        if model.use_snr else None
+    )
 
     metrics = _compute_metrics(mod_true, mod_pred, snr_true, snr_pred, MODULATIONS)
     baseline = load_stage_a_baseline(dataset)
@@ -200,7 +218,8 @@ def _evaluate_checkpoint(run_name, dataset, device, checkpoint_name):
             mask = channel == channel_id
             if np.any(mask):
                 metrics["by_channel"][channel_name] = _compute_metrics(
-                    mod_true[mask], mod_pred[mask], snr_true[mask], snr_pred[mask],
+                    mod_true[mask], mod_pred[mask], snr_true[mask],
+                    snr_pred[mask] if snr_pred is not None else None,
                     MODULATIONS,
                 )
     return metrics, mod_true, mod_pred, snr_true, snr_pred
@@ -218,6 +237,9 @@ def _save_plots(output_dir, metrics, snr_true, snr_pred):
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "accuracy_vs_snr.png"), dpi=300)
     plt.close(fig)
+
+    if snr_pred is None:
+        return
 
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.scatter(snr_true, snr_pred, s=8, alpha=0.2)
@@ -288,37 +310,43 @@ def _metrics_tables(title, metrics, include_comparison=None):
         lines.append(
             f"| {name} | {_format_value(values['accuracy'])} | {values['count']} |"
         )
-    lines.extend([
-        "",
-        "#### SNR estimation by true SNR",
-        "",
-        "| True SNR (dB) | Frames | MAE (dB) | RMSE (dB) | Bias (dB) |",
-        "|---:|---:|---:|---:|---:|",
-    ])
-    for level, values in metrics["snr_estimation"]["per_true_snr"].items():
-        lines.append(
-            f"| {level} | {values['count']} | {_format_value(values['mae_db'])} "
-            f"| {_format_value(values['rmse_db'])} | {_format_value(values['bias_db'])} |"
-        )
-    overall = metrics["snr_estimation"]["overall"]
-    quality = metrics["quality"]
-    lines.extend([
-        "",
-        "#### Overall SNR and quality metrics",
-        "",
-        f"- SNR MAE: {_format_value(overall['mae_db'])} dB",
-        f"- SNR RMSE: {_format_value(overall['rmse_db'])} dB",
-        f"- SNR bias (estimated - true): {_format_value(overall['bias_db'])} dB",
-        f"- Quality accuracy: {_format_value(quality['accuracy'])}",
-        f"- Fraction of quality errors off by one class: "
-        f"{_format_value(quality['fraction_of_errors_off_by_one'])}",
-        "",
-        "| True / estimated | Poor | Fair | Good |",
-        "|---|---:|---:|---:|",
-    ])
-    for row, name in enumerate(QUALITY_NAMES):
-        counts = quality["confusion_matrix"][row]
-        lines.append(f"| {name} | {counts[0]} | {counts[1]} | {counts[2]} |")
+    if metrics["snr_estimation"] is None:
+        lines.extend([
+            "",
+            "SNR estimates and quality metrics are unavailable for this checkpoint.",
+        ])
+    else:
+        lines.extend([
+            "",
+            "#### SNR estimation by true SNR",
+            "",
+            "| True SNR (dB) | Frames | MAE (dB) | RMSE (dB) | Bias (dB) |",
+            "|---:|---:|---:|---:|---:|",
+        ])
+        for level, values in metrics["snr_estimation"]["per_true_snr"].items():
+            lines.append(
+                f"| {level} | {values['count']} | {_format_value(values['mae_db'])} "
+                f"| {_format_value(values['rmse_db'])} | {_format_value(values['bias_db'])} |"
+            )
+        overall = metrics["snr_estimation"]["overall"]
+        quality = metrics["quality"]
+        lines.extend([
+            "",
+            "#### Overall SNR and quality metrics",
+            "",
+            f"- SNR MAE: {_format_value(overall['mae_db'])} dB",
+            f"- SNR RMSE: {_format_value(overall['rmse_db'])} dB",
+            f"- SNR bias (estimated - true): {_format_value(overall['bias_db'])} dB",
+            f"- Quality accuracy: {_format_value(quality['accuracy'])}",
+            f"- Fraction of quality errors off by one class: "
+            f"{_format_value(quality['fraction_of_errors_off_by_one'])}",
+            "",
+            "| True / estimated | Poor | Fair | Good |",
+            "|---|---:|---:|---:|",
+        ])
+        for row, name in enumerate(QUALITY_NAMES):
+            counts = quality["confusion_matrix"][row]
+            lines.append(f"| {name} | {counts[0]} | {counts[1]} | {counts[2]} |")
     if include_comparison is not None:
         lines.extend([
             "",
@@ -363,11 +391,7 @@ def evaluate(run_name, dataset, device, checkpoint_name="best.pt"):
     )
     output_dir = os.path.join(ROOT, "results", run_name, "eval")
     os.makedirs(output_dir, exist_ok=True)
-    checkpoint_path = (
-        checkpoint_name
-        if os.path.isabs(checkpoint_name)
-        else os.path.join(ROOT, "results", run_name, checkpoint_name)
-    )
+    checkpoint_path = _resolve_checkpoint_path(run_name, checkpoint_name)
     metrics["run_name"] = run_name
     metrics["dataset"] = dataset
     metrics["checkpoint"] = os.path.relpath(checkpoint_path, ROOT)

@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from dataset_loader import MODULATIONS
-from model import MultiTaskCNN
+from model import MultiTaskCNN, load_model_checkpoint, unpack_model_output
 
 
 RUNS = {
@@ -67,17 +67,18 @@ def _confused_pairs(tag, data_path, device):
     """Use the best checkpoint's test predictions to rank class confusions."""
     folder = os.path.join("results", tag)
     X, targets, snr = _test_arrays(data_path)
-    model = MultiTaskCNN().to(device)
-    checkpoint = torch.load(
-        os.path.join(folder, "best_model.pt"), map_location=device, weights_only=True
-    )
-    model.load_state_dict(checkpoint["model_state_dict"])
+    checkpoint_path = os.path.join(folder, "best_model.pt")
+    if not os.path.isfile(checkpoint_path):
+        checkpoint_path = os.path.join(folder, "best.pt")
+    model, _ = load_model_checkpoint(checkpoint_path, map_location=device)
+    model = model.to(device)
     model.eval()
     predictions = []
     with torch.inference_mode():
         for start in range(0, len(X), 256):
             batch = torch.from_numpy(X[start:start + 256]).to(device)
-            predictions.append(model(batch).argmax(dim=1).cpu().numpy())
+            logits, _, _, _ = unpack_model_output(model(batch))
+            predictions.append(logits.argmax(dim=1).cpu().numpy())
     predictions = np.concatenate(predictions)
 
     high_snr = snr >= 10

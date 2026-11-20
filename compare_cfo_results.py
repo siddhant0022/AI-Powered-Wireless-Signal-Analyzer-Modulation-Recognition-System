@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from dataset_loader import MODULATIONS
-from model import MultiTaskCNN
+from model import load_model_checkpoint, unpack_model_output
 
 
 RUNS = {
@@ -40,16 +40,17 @@ def _load_test_data(path):
 def _predict(tag, X):
     checkpoint_path = os.path.join("results", tag, "best_model.pt")
     if not os.path.isfile(checkpoint_path):
+        checkpoint_path = os.path.join("results", tag, "best.pt")
+    if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"Saved checkpoint not found: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    model = MultiTaskCNN()
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model, _ = load_model_checkpoint(checkpoint_path, map_location="cpu")
     model.eval()
     predictions = []
     with torch.inference_mode():
         for start in range(0, len(X), 256):
             batch = torch.from_numpy(X[start:start + 256])
-            predictions.append(model(batch).argmax(dim=1).numpy())
+            logits, _, _, _ = unpack_model_output(model(batch))
+            predictions.append(logits.argmax(dim=1).numpy())
     return np.concatenate(predictions)
 
 

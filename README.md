@@ -404,6 +404,21 @@ Evaluation reports and 300-dpi plots are written to
 modulation/SNR runs; it also reports the change in modulation accuracy against
 the recorded Stage A baseline.
 
+Evaluate anomaly detection and aggregate the three requested holdout runs:
+
+```powershell
+python evaluate_anomaly.py --run-name simulated_all_heads
+python evaluate_anomaly.py --run-name holdout_unknown_ofdm
+python evaluate_anomaly.py --run-name holdout_unknown_chirp
+python evaluate_anomaly.py --run-name holdout_jamming_tone
+python aggregate_holdout.py
+```
+
+Anomaly reports and plots are written under
+`results/<run-name>/eval_anomaly/`; aggregate seen/unseen results are written to
+`results/holdout_aggregate.md`. Validation selects both the maximum-F1 threshold
+and the 95%-recall threshold. Report tables use the maximum-F1 threshold.
+
 View all trainer options:
 
 ```powershell

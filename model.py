@@ -25,6 +25,26 @@ def quality_from_snr(snr_db):
     return int(quality) if quality.ndim == 0 else quality
 
 
+def unpack_model_output(output):
+    """Normalize legacy tensor, SNR tuple, and anomaly-dict model outputs."""
+    if isinstance(output, dict):
+        if "mod_logits" not in output:
+            raise ValueError("model output dict is missing mod_logits")
+        return (
+            output["mod_logits"],
+            output.get("snr_pred"),
+            output.get("anomaly_logit"),
+            output.get("type_logits"),
+        )
+    if isinstance(output, tuple):
+        if len(output) != 2:
+            raise ValueError("legacy tuple output must contain modulation and SNR tensors")
+        return output[0], output[1], None, None
+    if isinstance(output, torch.Tensor):
+        return output, None, None, None
+    raise TypeError(f"unsupported model output type: {type(output).__name__}")
+
+
 class ResBlock(nn.Module):
     """Two same-width convolutions with a residual connection."""
 
