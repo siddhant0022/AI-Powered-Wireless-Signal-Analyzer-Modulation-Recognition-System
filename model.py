@@ -1,6 +1,28 @@
-"""Compact 1D CNN for modulation recognition and optional SNR estimation."""
+"""Compact 1D CNN for modulation recognition and optional SNR estimation.
+
+With ``use_snr=False``, ``forward`` returns modulation logits of shape
+``(B, n_mod)``. With ``use_snr=True``, it returns ``(mod_logits, snr_pred)``,
+where ``snr_pred`` has shape ``(B, 1)`` and is scaled by 20.
+"""
+import os
+
+import numpy as np
 import torch
 from torch import nn
+
+
+def scale_snr_target(snr_db):
+    """Scale SNR dB labels into the model's training range."""
+    return snr_db / 20
+
+
+def quality_from_snr(snr_db):
+    """Map SNR in dB to 0=Poor, 1=Fair, or 2=Good; preserve scalar inputs."""
+    if isinstance(snr_db, torch.Tensor):
+        return torch.where(snr_db < 0, 0, torch.where(snr_db < 10, 1, 2))
+    snr_db = np.asarray(snr_db)
+    quality = np.where(snr_db < 0, 0, np.where(snr_db < 10, 1, 2))
+    return int(quality) if quality.ndim == 0 else quality
 
 
 class ResBlock(nn.Module):
@@ -26,7 +48,10 @@ class MultiTaskCNN(nn.Module):
     def __init__(self, n_mod=11, use_snr=False, widths=(32, 64, 128), dropout=0.3):
         super().__init__()
         w1, w2, w3 = widths
+        self.n_mod = n_mod
         self.use_snr = use_snr
+        self.widths = tuple(widths)
+        self.dropout = dropout
         self.features = nn.Sequential(
             nn.Conv1d(2, w1, kernel_size=7, padding=3, bias=False),
             nn.BatchNorm1d(w1),
@@ -63,6 +88,47 @@ class MultiTaskCNN(nn.Module):
         if not self.use_snr:
             return logits
         return logits, self.snr_head(shared)
+
+    def predict_snr_db(self, x):
+        """Return SNR predictions in dB for an SNR-enabled model."""
+        if not self.use_snr:
+            raise RuntimeError("predict_snr_db requires a model constructed with use_snr=True")
+        _, snr_pred = self(x)
+        return snr_pred * 20
+
+    def get_config(self):
+        """Return the constructor options needed to recreate this model."""
+        return {
+            "n_mod": self.n_mod,
+            "use_snr": self.use_snr,
+            "widths": list(self.widths),
+            "dropout": self.dropout,
+        }
+
+
+def checkpoint_payload(model, **metadata):
+    """Build a new checkpoint including model configuration and optional metadata."""
+    reserved = {"config", "model_state_dict"}.intersection(metadata)
+    if reserved:
+        raise ValueError(f"metadata cannot replace reserved checkpoint fields: {sorted(reserved)}")
+    return {
+        **metadata,
+        "config": model.get_config(),
+        "model_state_dict": model.state_dict(),
+    }
+
+
+def load_model_checkpoint(path, map_location="cpu"):
+    """Load a configured checkpoint or a legacy Stage A checkpoint without config."""
+    checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+    if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
+        raise ValueError(f"{os.fspath(path)} is missing model_state_dict")
+    config = checkpoint.get("config", {})
+    if not isinstance(config, dict):
+        raise ValueError(f"{os.fspath(path)} has an invalid model config")
+    model = MultiTaskCNN(**config)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    return model, checkpoint
 
 
 if __name__ == "__main__":
