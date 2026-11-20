@@ -1,0 +1,29 @@
+{
+  "dataset": "simulated",
+  "data": null,
+  "use_snr": true,
+  "lambda_snr": 1.0,
+  "epochs": 3,
+  "batch_size": 256,
+  "lr": 0.001,
+  "wd": 0.0001,
+  "device": "cpu",
+  "run_name": "smoke_snr",
+  "out_dir": "results",
+  "patience": null,
+  "resume": false,
+  "seed": 2026,
+  "data_path": "C:\\coding\\AI-Wireless-Signal_Analyzer\\AI-Powered-Wireless-Signal-Analyzer-Modulation-Recognition-System\\data\\signal_dataset.npz",
+  "effective_patience": null,
+  "model": {
+    "n_mod": 11,
+    "use_snr": true,
+    "widths": [
+      32,
+      64,
+      128
+    ],
+    "dropout": 0.3
+  },
+  "checkpoint_selection": "val_mod_acc - 0.5 * val_snr_mae_db / 20"
+}

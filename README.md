@@ -375,6 +375,18 @@ Runs save `best.pt`, `last.pt`, `history.csv`, and `config.json` under
 `results/<run-name>/`. The default modulation-only path retains validation
 cross-entropy checkpoint selection and its Stage A test evaluation.
 
+Evaluate a joint model on the held-out test split:
+
+```powershell
+python evaluate_snr.py --run-name simulated_snr --dataset simulated
+python evaluate_snr.py --run-name radioml_snr --dataset radioml
+```
+
+Evaluation reports and 300-dpi plots are written to
+`results/<run-name>/eval/`. The evaluator alone loads the test split for joint
+modulation/SNR runs; it also reports the change in modulation accuracy against
+the recorded Stage A baseline.
+
 View all trainer options:
 
 ```powershell
