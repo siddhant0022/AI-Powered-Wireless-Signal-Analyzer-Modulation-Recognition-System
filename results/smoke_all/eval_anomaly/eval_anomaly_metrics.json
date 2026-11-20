@@ -1,0 +1,221 @@
+{
+  "test_frames": 7659,
+  "normal_frames": 6600,
+  "anomaly_frames": 1059,
+  "overall": {
+    "threshold": 0.6876504421234131,
+    "precision": 0.615819209039548,
+    "recall": 0.5146364494806421,
+    "f1": 0.5606995884773662,
+    "false_positive_rate": 0.051515151515151514,
+    "tp": 545,
+    "fp": 340,
+    "fn": 514,
+    "tn": 6260,
+    "roc_auc": 0.8699367613815205,
+    "pr_auc": 0.6631050287961064
+  },
+  "per_anomaly_type": {
+    "jamming_tone": {
+      "anomaly_count": 204,
+      "detection_rate": 0.5980392156862745,
+      "roc_auc": 0.8709024064171123,
+      "exposure": "seen"
+    },
+    "clipping": {
+      "anomaly_count": 201,
+      "detection_rate": 0.31840796019900497,
+      "roc_auc": 0.7230785466606362,
+      "exposure": "seen"
+    },
+    "impulsive_noise": {
+      "anomaly_count": 201,
+      "detection_rate": 0.7810945273631841,
+      "roc_auc": 0.9515799788934116,
+      "exposure": "seen"
+    },
+    "unknown_ofdm": {
+      "anomaly_count": 228,
+      "detection_rate": 0.3684210526315789,
+      "roc_auc": 0.8929964114832536,
+      "exposure": "seen"
+    },
+    "unknown_chirp": {
+      "anomaly_count": 225,
+      "detection_rate": 0.5244444444444445,
+      "roc_auc": 0.903952861952862,
+      "exposure": "seen"
+    }
+  },
+  "by_snr_range": {
+    "snr_lt_0_db": {
+      "false_positive_rate_normal": 0.1003030303030303,
+      "normal_count": 3300,
+      "detection_rate_by_type": {
+        "jamming_tone": {
+          "detection_rate": 0.40404040404040403,
+          "count": 99
+        },
+        "clipping": {
+          "detection_rate": 0.5887850467289719,
+          "count": 107
+        },
+        "impulsive_noise": {
+          "detection_rate": 0.5784313725490197,
+          "count": 102
+        },
+        "unknown_ofdm": {
+          "detection_rate": 0.21495327102803738,
+          "count": 107
+        },
+        "unknown_chirp": {
+          "detection_rate": 0.16037735849056603,
+          "count": 106
+        }
+      }
+    },
+    "snr_0_to_9_db": {
+      "false_positive_rate_normal": 0.0024242424242424242,
+      "normal_count": 1650,
+      "detection_rate_by_type": {
+        "jamming_tone": {
+          "detection_rate": 0.7346938775510204,
+          "count": 49
+        },
+        "clipping": {
+          "detection_rate": 0.022222222222222223,
+          "count": 45
+        },
+        "impulsive_noise": {
+          "detection_rate": 1.0,
+          "count": 49
+        },
+        "unknown_ofdm": {
+          "detection_rate": 0.3333333333333333,
+          "count": 57
+        },
+        "unknown_chirp": {
+          "detection_rate": 0.7758620689655172,
+          "count": 58
+        }
+      }
+    },
+    "snr_ge_10_db": {
+      "false_positive_rate_normal": 0.0030303030303030303,
+      "normal_count": 1650,
+      "detection_rate_by_type": {
+        "jamming_tone": {
+          "detection_rate": 0.8214285714285714,
+          "count": 56
+        },
+        "clipping": {
+          "detection_rate": 0.0,
+          "count": 49
+        },
+        "impulsive_noise": {
+          "detection_rate": 0.98,
+          "count": 50
+        },
+        "unknown_ofdm": {
+          "detection_rate": 0.65625,
+          "count": 64
+        },
+        "unknown_chirp": {
+          "detection_rate": 0.9180327868852459,
+          "count": 61
+        }
+      }
+    }
+  },
+  "type_classification": {
+    "confusion_matrix": [
+      [
+        157,
+        10,
+        3,
+        33,
+        1
+      ],
+      [
+        22,
+        173,
+        0,
+        6,
+        0
+      ],
+      [
+        8,
+        4,
+        163,
+        26,
+        0
+      ],
+      [
+        22,
+        19,
+        12,
+        173,
+        2
+      ],
+      [
+        18,
+        12,
+        4,
+        56,
+        135
+      ]
+    ],
+    "accuracy_by_type": {
+      "jamming_tone": 0.7696078431372549,
+      "clipping": 0.8606965174129353,
+      "impulsive_noise": 0.8109452736318408,
+      "unknown_ofdm": 0.7587719298245614,
+      "unknown_chirp": 0.6
+    },
+    "anomaly_frames": 1059
+  },
+  "overall_at_95_recall": {
+    "threshold": 0.19025109708309174,
+    "precision": 0.2136392338455062,
+    "recall": 0.9584513692162417,
+    "f1": 0.3493975903614458,
+    "false_positive_rate": 0.566060606060606,
+    "tp": 1015,
+    "fp": 3736,
+    "fn": 44,
+    "tn": 2864,
+    "roc_auc": 0.8699367613815205,
+    "pr_auc": 0.6631050287961064
+  },
+  "run_name": "smoke_all",
+  "checkpoint": "results/smoke_all/best.pt",
+  "dataset": "simulated",
+  "holdout_anomaly_type": null,
+  "validation_frames_for_thresholds": 7741,
+  "validation_thresholds": {
+    "max_f1": {
+      "threshold": 0.6876504421234131,
+      "precision": 0.6605206073752712,
+      "recall": 0.5337423312883436,
+      "f1": 0.5904023267086767,
+      "false_positive_rate": 0.047424242424242424,
+      "tp": 609,
+      "fp": 313,
+      "fn": 532,
+      "tn": 6287
+    },
+    "recall_95": {
+      "threshold": 0.19025109708309174,
+      "precision": 0.2265886287625418,
+      "recall": 0.9500438212094654,
+      "f1": 0.36590717299578057,
+      "false_positive_rate": 0.5606060606060606,
+      "tp": 1084,
+      "fp": 3700,
+      "fn": 57,
+      "tn": 2900
+    }
+  },
+  "table_threshold": "max_f1",
+  "type_head_enabled": true
+}
