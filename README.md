@@ -371,9 +371,26 @@ python train.py --dataset radioml --use-snr --epochs 60 --run-name radioml_snr
 The joint model selects checkpoints using
 `val_mod_acc - 0.5 * val_snr_mae_db / 20`. Use `--resume` with the same run name
 to continue from its `last.pt`; the requested `--epochs` is the final epoch number.
+The SNR regression loss uses SmoothL1 with `--snr-loss-beta` (default `1.0`).
 Runs save `best.pt`, `last.pt`, `history.csv`, and `config.json` under
 `results/<run-name>/`. The default modulation-only path retains validation
 cross-entropy checkpoint selection and its Stage A test evaluation.
+
+Joint modulation, SNR, and anomaly training uses only the simulated dataset:
+
+```powershell
+python train.py --dataset simulated --use-anomaly --use-anomaly-type --epochs 60 --run-name simulated_all_heads
+```
+
+The anomaly checkpoint score is
+`val_mod_acc - 0.5 * val_snr_mae_db / 20 + val_anomaly_f1`. To hold an anomaly
+type out of training and validation for a later unseen-type evaluation, use:
+
+```powershell
+python train.py --dataset simulated --use-anomaly --use-anomaly-type --holdout-anomaly-type unknown_ofdm --epochs 60 --run-name holdout_unknown_ofdm
+python train.py --dataset simulated --use-anomaly --use-anomaly-type --holdout-anomaly-type unknown_chirp --epochs 60 --run-name holdout_unknown_chirp
+python train.py --dataset simulated --use-anomaly --use-anomaly-type --holdout-anomaly-type jamming_tone --epochs 60 --run-name holdout_jamming_tone
+```
 
 Evaluate a joint model on the held-out test split:
 

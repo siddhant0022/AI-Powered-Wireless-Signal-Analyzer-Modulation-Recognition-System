@@ -45,13 +45,21 @@ class ResBlock(nn.Module):
 
 
 class MultiTaskCNN(nn.Module):
-    def __init__(self, n_mod=11, use_snr=False, widths=(32, 64, 128), dropout=0.3):
+    def __init__(self, n_mod=11, use_snr=False, widths=(32, 64, 128), dropout=0.3,
+                 snr_loss_beta=1.0, use_anomaly=False, use_anomaly_type=False):
         super().__init__()
+        if snr_loss_beta <= 0:
+            raise ValueError("snr_loss_beta must be positive")
+        if use_anomaly_type and not use_anomaly:
+            raise ValueError("use_anomaly_type requires use_anomaly=True")
         w1, w2, w3 = widths
         self.n_mod = n_mod
         self.use_snr = use_snr
+        self.use_anomaly = use_anomaly
+        self.use_anomaly_type = use_anomaly_type
         self.widths = tuple(widths)
         self.dropout = dropout
+        self.snr_loss_beta = snr_loss_beta
         self.features = nn.Sequential(
             nn.Conv1d(2, w1, kernel_size=7, padding=3, bias=False),
             nn.BatchNorm1d(w1),
@@ -79,12 +87,26 @@ class MultiTaskCNN(nn.Module):
             nn.Sequential(nn.Linear(128, 64), nn.ReLU(inplace=True), nn.Linear(64, 1))
             if use_snr else None
         )
+        self.anomaly_head = nn.Linear(128, 1) if use_anomaly else None
+        self.anomaly_type_head = (
+            nn.Linear(128, 5) if use_anomaly_type else None
+        )
 
     def forward(self, x):
         features = self.features(x)
         pooled = torch.cat((features.mean(dim=-1), features.amax(dim=-1)), dim=1)
         shared = self.shared(pooled)
         logits = self.modulation_head(shared)
+        if self.use_anomaly:
+            outputs = {
+                "mod_logits": logits,
+                "anomaly_logit": self.anomaly_head(shared),
+            }
+            if self.use_snr:
+                outputs["snr_pred"] = self.snr_head(shared)
+            if self.use_anomaly_type:
+                outputs["type_logits"] = self.anomaly_type_head(shared)
+            return outputs
         if not self.use_snr:
             return logits
         return logits, self.snr_head(shared)
@@ -93,7 +115,10 @@ class MultiTaskCNN(nn.Module):
         """Return SNR predictions in dB for an SNR-enabled model."""
         if not self.use_snr:
             raise RuntimeError("predict_snr_db requires a model constructed with use_snr=True")
-        _, snr_pred = self(x)
+        if self.use_anomaly:
+            snr_pred = self(x)["snr_pred"]
+        else:
+            _, snr_pred = self(x)
         return snr_pred * 20
 
     def get_config(self):
@@ -103,6 +128,9 @@ class MultiTaskCNN(nn.Module):
             "use_snr": self.use_snr,
             "widths": list(self.widths),
             "dropout": self.dropout,
+            "snr_loss_beta": self.snr_loss_beta,
+            "use_anomaly": self.use_anomaly,
+            "use_anomaly_type": self.use_anomaly_type,
         }
 
 

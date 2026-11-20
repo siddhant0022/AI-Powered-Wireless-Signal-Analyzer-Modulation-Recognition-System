@@ -1,6 +1,8 @@
 import csv
+import json
 
 import numpy as np
+import pytest
 import torch
 
 from build_dataset import stratified_split
@@ -11,7 +13,16 @@ from model import (
     quality_from_snr,
     scale_snr_target,
 )
-from train import _make_loader, load_training_splits, main, rotate_phase
+from simulator import ANOMALY_TYPES
+from train import (
+    _anomaly_losses,
+    _make_loader,
+    _run_epoch,
+    load_anomaly_training_splits,
+    load_training_splits,
+    main,
+    rotate_phase,
+)
 
 
 def _write_small_training_dataset(path, frame_count=240):
@@ -47,6 +58,42 @@ def _small_run_args(dataset_path, out_dir, run_name, epochs, *extra):
     ]
 
 
+def _write_small_anomaly_dataset(path):
+    rng = np.random.default_rng(2026)
+    split_parts = []
+    for split_id, normal_count, anomaly_count in (
+        (0, 120, 40), (1, 30, 10), (2, 30, 10),
+    ):
+        split_parts.extend([
+            (split_id, 0, normal_count),
+            (split_id, 1, anomaly_count),
+        ])
+    X, mod, snr, split, anomaly, anomaly_type = [], [], [], [], [], []
+    for split_id, is_anomaly, count in split_parts:
+        for index in range(count):
+            X.append(rng.standard_normal((2, 128), dtype=np.float32))
+            split.append(split_id)
+            anomaly.append(is_anomaly)
+            if is_anomaly:
+                type_id = index % 5 + 1
+                anomaly_type.append(type_id)
+                mod.append(index % 11 if type_id <= 3 else -1)
+            else:
+                anomaly_type.append(0)
+                mod.append(index % 11)
+            snr.append(int(rng.choice(np.arange(-20, 20, 2))))
+    np.savez_compressed(
+        path,
+        X=np.asarray(X, dtype=np.float32),
+        mod=np.asarray(mod, dtype=np.int16),
+        snr=np.asarray(snr, dtype=np.int16),
+        split=np.asarray(split, dtype=np.int8),
+        anomaly=np.asarray(anomaly, dtype=np.int8),
+        anomaly_type=np.asarray(anomaly_type, dtype=np.int8),
+    )
+    return path
+
+
 def test_modulation_output_shape():
     model = MultiTaskCNN()
     assert model(torch.randn(4, 2, 128)).shape == (4, 11)
@@ -61,6 +108,43 @@ def test_snr_enabled_output_shapes_and_db_prediction():
     assert snr_pred.shape == (4, 1)
     assert torch.equal(model.predict_snr_db(inputs), snr_pred * 20)
     assert scale_snr_target(torch.tensor([-20.0, 0.0, 20.0])).tolist() == [-1, 0, 1]
+
+
+def test_anomaly_model_output_keys_and_shapes():
+    model = MultiTaskCNN(
+        use_snr=True, use_anomaly=True, use_anomaly_type=True
+    ).eval()
+    outputs = model(torch.randn(4, 2, 128))
+
+    assert set(outputs) == {
+        "mod_logits", "snr_pred", "anomaly_logit", "type_logits",
+    }
+    assert outputs["mod_logits"].shape == (4, 11)
+    assert outputs["snr_pred"].shape == (4, 1)
+    assert outputs["anomaly_logit"].shape == (4, 1)
+    assert outputs["type_logits"].shape == (4, 5)
+
+
+def test_default_snr_loss_beta_matches_smooth_l1_default():
+    torch.manual_seed(2026)
+    model = MultiTaskCNN(use_snr=True).eval()
+    X = np.random.default_rng(2026).standard_normal((4, 2, 128)).astype(np.float32)
+    mod = np.array([0, 1, 2, 3], dtype=np.int64)
+    snr_db = np.array([-20, -2, 10, 18], dtype=np.int16)
+    loader = _make_loader((X, mod, snr_db), 4, shuffle=False, use_snr=True)
+    criterion = torch.nn.CrossEntropyLoss()
+    inputs, mod_target, snr_target = next(iter(loader))
+
+    with torch.inference_mode():
+        mod_logits, snr_pred = model(inputs)
+        expected_loss = criterion(mod_logits, mod_target) + torch.nn.functional.smooth_l1_loss(
+            snr_pred.squeeze(1), snr_target
+        )
+    actual_loss, _, _ = _run_epoch(
+        model, loader, criterion, torch.device("cpu"), use_snr=True
+    )
+
+    assert actual_loss == pytest.approx(expected_loss.item())
 
 
 def test_parameter_count_is_in_expected_range():
@@ -102,10 +186,110 @@ def test_new_checkpoint_contains_config_and_loads(tmp_path):
     assert loaded.get_config() == original.get_config()
 
 
+def test_anomaly_checkpoint_round_trip(tmp_path):
+    original = MultiTaskCNN(
+        use_snr=True, use_anomaly=True, use_anomaly_type=True
+    ).eval()
+    path = tmp_path / "anomaly_configured.pt"
+    torch.save(checkpoint_payload(original, epoch=1), path)
+
+    loaded, checkpoint = load_model_checkpoint(path)
+    loaded.eval()
+    inputs = torch.randn(4, 2, 128)
+
+    assert checkpoint["config"]["use_anomaly"] is True
+    assert checkpoint["config"]["use_anomaly_type"] is True
+    for key, value in original(inputs).items():
+        assert torch.equal(value, loaded(inputs)[key])
+
+
 def test_quality_from_snr_thresholds():
     snr_db = np.array([-2, 0, 8, 9, 10, 18])
 
     assert quality_from_snr(snr_db).tolist() == [0, 1, 1, 1, 2, 2]
+
+
+def test_anomaly_losses_mask_mod_snr_and_type_targets():
+    torch.manual_seed(2026)
+    outputs = {
+        "mod_logits": torch.randn(4, 11),
+        "snr_pred": torch.randn(4, 1),
+        "anomaly_logit": torch.randn(4, 1),
+        "type_logits": torch.randn(4, 5),
+    }
+    mod_target = torch.tensor([0, 1, -1, -1])
+    snr_target = torch.tensor([-1.0, 0.5, 0.2, -0.3])
+    anomaly_target = torch.tensor([0.0, 0.0, 1.0, 1.0])
+    type_target = torch.tensor([0, 0, 1, 5])
+    pos_weight = torch.tensor(1.0)
+    initial = _anomaly_losses(
+        outputs, mod_target, snr_target, anomaly_target, type_target,
+        pos_weight, use_anomaly_type=True,
+    )
+
+    changed_targets = _anomaly_losses(
+        outputs,
+        torch.tensor([0, 1, 999, 999]),
+        torch.tensor([-1.0, 0.5, 999.0, -999.0]),
+        anomaly_target,
+        torch.tensor([999, -999, 1, 5]),
+        pos_weight,
+        use_anomaly_type=True,
+    )
+
+    assert torch.equal(initial["mod"], changed_targets["mod"])
+    assert torch.equal(initial["snr"], changed_targets["snr"])
+    assert torch.equal(initial["type"], changed_targets["type"])
+
+
+def test_holdout_anomaly_type_is_excluded_from_train_and_val(tmp_path):
+    dataset_path = _write_small_anomaly_dataset(tmp_path / "anomaly.npz")
+
+    splits = load_anomaly_training_splits(dataset_path, "unknown_ofdm")
+
+    heldout_type_id = ANOMALY_TYPES.index("unknown_ofdm")
+    assert not np.any(splits["train"][4] == heldout_type_id)
+    assert not np.any(splits["val"][4] == heldout_type_id)
+    assert np.any(splits["train"][3] == 1)
+    assert np.any(splits["val"][3] == 1)
+
+
+def test_all_heads_anomaly_training_smoke(tmp_path):
+    dataset_path = _write_small_anomaly_dataset(tmp_path / "anomaly.npz")
+    args = [
+        "--dataset", "simulated",
+        "--data", str(dataset_path),
+        "--out-dir", str(tmp_path),
+        "--run-name", "anomaly-smoke",
+        "--epochs", "1",
+        "--batch-size", "64",
+        "--device", "cpu",
+        "--seed", "2026",
+        "--use-anomaly",
+        "--use-anomaly-type",
+    ]
+
+    output_dir = main(args)
+
+    assert (tmp_path / "anomaly-smoke" / "best.pt").is_file()
+    assert (tmp_path / "anomaly-smoke" / "last.pt").is_file()
+    checkpoint = torch.load(
+        tmp_path / "anomaly-smoke" / "last.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert checkpoint["config"]["use_snr"] is True
+    assert checkpoint["config"]["use_anomaly"] is True
+    assert checkpoint["config"]["use_anomaly_type"] is True
+    assert np.isfinite(checkpoint["val_metrics"]["total_loss"])
+    assert output_dir == str(tmp_path / "anomaly-smoke")
+    with open(tmp_path / "anomaly-smoke" / "history.csv", newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1
+    assert all(np.isfinite(float(rows[0][name])) for name in (
+        "train_loss", "val_loss", "val_mod_acc", "val_snr_mae_db",
+        "val_anomaly_f1", "val_type_acc",
+    ))
 
 
 def test_snr_training_smoke_writes_checkpoints_and_finite_losses(tmp_path):
@@ -133,10 +317,13 @@ def test_snr_training_smoke_writes_checkpoints_and_finite_losses(tmp_path):
     )
     assert checkpoint["epoch"] == 1
     assert checkpoint["config"]["use_snr"] is True
+    assert checkpoint["config"]["snr_loss_beta"] == 1.0
     assert {
         "optimizer_state_dict", "scheduler_state_dict", "rng_states", "best_score",
     }.issubset(checkpoint)
     assert (tmp_path / "snr-smoke" / "config.json").is_file()
+    with open(tmp_path / "snr-smoke" / "config.json", encoding="utf-8") as stream:
+        assert json.load(stream)["snr_loss_beta"] == 1.0
     assert output_dir == str(tmp_path / "snr-smoke")
 
 
