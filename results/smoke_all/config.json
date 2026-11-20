@@ -1,0 +1,38 @@
+{
+  "dataset": "simulated",
+  "data": null,
+  "use_snr": true,
+  "use_anomaly": true,
+  "use_anomaly_type": true,
+  "holdout_anomaly_type": null,
+  "lambda_snr": 1.0,
+  "lambda_anom": 0.5,
+  "lambda_type": 1.0,
+  "snr_loss_beta": 1.0,
+  "epochs": 3,
+  "batch_size": 256,
+  "lr": 0.001,
+  "wd": 0.0001,
+  "device": "cpu",
+  "run_name": "smoke_all",
+  "out_dir": "results",
+  "patience": null,
+  "resume": false,
+  "seed": 2026,
+  "data_path": "C:\\coding\\AI-Wireless-Signal_Analyzer\\AI-Powered-Wireless-Signal-Analyzer-Modulation-Recognition-System\\data\\signal_dataset.npz",
+  "model": {
+    "n_mod": 11,
+    "use_snr": true,
+    "widths": [
+      32,
+      64,
+      128
+    ],
+    "dropout": 0.3,
+    "snr_loss_beta": 1.0,
+    "use_anomaly": true,
+    "use_anomaly_type": true
+  },
+  "anomaly_pos_weight": 5.811320754716981,
+  "checkpoint_selection": "val_mod_acc - 0.5 * val_snr_mae_db / 20 + val_anomaly_f1 (anomaly threshold=0.5)"
+}
